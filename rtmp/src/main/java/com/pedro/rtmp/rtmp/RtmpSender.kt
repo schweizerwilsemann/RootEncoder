@@ -16,6 +16,7 @@
 
 package com.pedro.rtmp.rtmp
 
+import android.util.Base64
 import android.util.Log
 import com.pedro.common.AudioCodec
 import com.pedro.common.ConnectChecker
@@ -33,8 +34,14 @@ import com.pedro.rtmp.flv.video.packet.Av1Packet
 import com.pedro.rtmp.flv.video.packet.H264Packet
 import com.pedro.rtmp.flv.video.packet.H265Packet
 import com.pedro.rtmp.utils.socket.RtmpSocket
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.plus
 import kotlinx.coroutines.runInterruptible
+import java.io.File
 import java.nio.ByteBuffer
 
 /**
@@ -42,24 +49,48 @@ import java.nio.ByteBuffer
  */
 class RtmpSender(
   connectChecker: ConnectChecker,
-  private val commandsManager: CommandsManager
-): BaseSender(connectChecker, "RtmpSender") {
+  private val commandsManager: CommandsManager,
+) : BaseSender(connectChecker, "RtmpSender") {
 
   private var audioPacket: BasePacket = AacPacket()
   private var videoPacket: BasePacket = H264Packet()
   var socket: RtmpSocket? = null
 
   override fun setVideoInfo(sps: ByteBuffer, pps: ByteBuffer?, vps: ByteBuffer?) {
+    fun printBytes(data: ByteBuffer, tag: String) {
+      val temp = data.duplicate()
+      val byteArray = ByteArray(temp.remaining())
+      temp.get(byteArray)
+      fun extractSpsRbsp(bytes: ByteArray): ByteArray {
+        val offset =
+          (if (bytes.size >= 4 && bytes[0] == 0.toByte() && bytes[1] == 0.toByte() && bytes[2] == 0.toByte() && bytes[3] == 1.toByte()) 4 else if (bytes.size >= 3 && bytes[0] == 0.toByte() && bytes[1] == 0.toByte() && bytes[2] == 1.toByte()) 3 else 0) + 1 // skip nal unit type
+
+        return bytes.copyOfRange(offset, bytes.size)
+      }
+
+      val base64String = Base64.encodeToString(extractSpsRbsp(byteArray), Base64.NO_WRAP)
+      Log.d(tag, base64String)
+      Log.d(tag, byteArray.joinToString(separator = "") { String.format("%02X", it) })
+    }
     videoPacket = when (commandsManager.videoCodec) {
       VideoCodec.H265 -> {
         if (vps == null || pps == null) throw IllegalArgumentException("pps or vps can't be null with h265")
+        printBytes(data = sps, tag = "SPS-H265")
+        printBytes(data = pps, tag = "PPS-H265")
+        printBytes(data = vps, tag = "VPS-H265")
         H265Packet().apply { sendVideoInfo(sps, pps, vps) }
       }
+
       VideoCodec.AV1 -> {
+        printBytes(data = sps, tag = "SPS-AV1")
         Av1Packet().apply { sendVideoInfo(sps) }
       }
+
       else -> {
         if (pps == null) throw IllegalArgumentException("pps can't be null with h264")
+        printBytes(data = sps, tag = "SPS-H264")
+        printBytes(data = pps, tag = "PPS-H264")
+
         H264Packet().apply { sendVideoInfo(sps, pps) }
       }
     }
@@ -118,11 +149,87 @@ class RtmpSender(
     videoPacket.reset(clear)
   }
 
+//  val job = CoroutineScope(Dispatchers.IO) + SupervisorJob()
+
   private suspend fun getFlvPacket(mediaFrame: MediaFrame?, callback: suspend (FlvPacket) -> Unit) {
     if (mediaFrame == null) return
+    // TODO: Tạm thời loại bỏ cứng SEI trước IDR để tránh lỗi streaming FLV/RTMP
+    if (mediaFrame.info.isKeyFrame) {
+      val newMediaFrame = MediaFrame(
+        data = removeSeiBeforeIdr(
+          buffer = mediaFrame.data, headerSize = 0xd0
+        ), info = mediaFrame.info, type = mediaFrame.type
+      )
+      when (mediaFrame.type) {
+        MediaFrame.Type.VIDEO -> videoPacket.createFlvPacket(newMediaFrame) { callback(it) }
+        MediaFrame.Type.AUDIO -> audioPacket.createFlvPacket(newMediaFrame) { callback(it) }
+      }
+      return
+    }
     when (mediaFrame.type) {
       MediaFrame.Type.VIDEO -> videoPacket.createFlvPacket(mediaFrame) { callback(it) }
       MediaFrame.Type.AUDIO -> audioPacket.createFlvPacket(mediaFrame) { callback(it) }
+    }
+  }
+
+  /**
+   * Removes vendor-specific SEI or proprietary header inserted before an IDR frame.
+   *
+   * Some Chinese device encoders prepend a fixed-size SEI or private header
+   * before the actual IDR NAL unit, which breaks downstream muxers (e.g. FLV/RTMP).
+   *
+   * This function assumes:
+   * - The frame is already identified as a keyframe (IDR)
+   * - The SEI/header size is known and fixed per device/firmware
+   *
+   * ⚠ This is a low-level, device-specific workaround.
+   * Using an incorrect header size WILL corrupt the bitstream.
+   *
+   * @param buffer Raw encoded frame data.
+   * @param headerSize Number of bytes to strip from the beginning of the buffer.
+   * @return A sliced ByteBuffer containing only the actual H.264 payload.
+   */
+  fun removeSeiBeforeIdr(
+    buffer: ByteBuffer,
+    headerSize: Int,
+  ): ByteBuffer {
+    val dup = buffer.duplicate()
+    require(dup.remaining() > headerSize) {
+      "Buffer too small: remaining=${dup.remaining()}, headerSize=$headerSize"
+    }
+    dup.position(dup.position() + headerSize)
+    return dup.slice()
+  }
+
+  /**
+   * Dumps the current video frame to a temporary H.264 file if it is an IDR (keyframe).
+   *
+   * asynchronously writes the raw H.264 byte payload to the app's cache directory.
+   *
+   * Intended strictly for debugging and low-level inspection of encoder output.
+   *
+   * ⚠ Side effects:
+   * - Performs disk I/O on Dispatchers.IO
+   * - Spawns a new CoroutineScope per invocation
+   * - Writes raw H.264 data without container or metadata
+   *
+   * @param mediaFrame Video frame containing encoded H.264 data.
+   */
+  fun dumpIdrFrameToCache(mediaFrame: MediaFrame) {
+    val job = CoroutineScope(Dispatchers.IO) + SupervisorJob()
+
+    if (mediaFrame.info.isKeyFrame) {
+      job.launch {
+        val file = File(
+          "/data/data/app.smartsports.sst.vn.dev/cache/" + "${System.currentTimeMillis()}_frame.h264"
+        )
+        file.outputStream().use { output ->
+          val buffer = mediaFrame.data.duplicate()
+          val bytes = ByteArray(buffer.remaining())
+          buffer.get(bytes)
+          output.write(bytes)
+        }
+      }
     }
   }
 }

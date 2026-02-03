@@ -27,6 +27,8 @@ import android.util.Size
 import android.view.MotionEvent
 import android.view.View
 import androidx.annotation.RequiresApi
+import com.pedro.encoder.input.sources.OrientationConfig
+import com.pedro.encoder.input.sources.OrientationForced
 import com.pedro.encoder.input.video.Camera2ApiManager
 import com.pedro.encoder.input.video.Camera2ApiManager.ImageCallback
 import com.pedro.encoder.input.video.CameraCallbacks
@@ -38,7 +40,7 @@ import com.pedro.encoder.input.video.facedetector.FaceDetectorCallback
  * Created by pedro on 11/1/24.
  */
 @RequiresApi(Build.VERSION_CODES.LOLLIPOP)
-class Camera2Source(context: Context): VideoSource() {
+class Camera2Source(context: Context) : VideoSource() {
 
   private val camera = Camera2ApiManager(context)
   private var facing = CameraHelper.Facing.BACK
@@ -223,7 +225,7 @@ class Camera2Source(context: Context): VideoSource() {
     format: Int,
     maxImages: Int,
     autoClose: Boolean = true,
-    listener: ImageCallback
+    listener: ImageCallback,
   ) {
     val w = if (rotation == 90 || rotation == 270) height else width
     val h = if (rotation == 90 || rotation == 270) width else height
@@ -311,5 +313,11 @@ class Camera2Source(context: Context): VideoSource() {
    */
   fun setCustomRequest(request: (CaptureRequest.Builder) -> Unit): Boolean {
     return camera.setCustomRequest(request)
+  }
+
+  override fun getOrientationConfig(): OrientationConfig {
+    return OrientationConfig(
+      forced = OrientationForced.LANDSCAPE
+    )
   }
 }
