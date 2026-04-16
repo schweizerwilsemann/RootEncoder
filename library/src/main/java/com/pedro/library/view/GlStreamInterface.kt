@@ -295,10 +295,16 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
         mainRender.drawFilters(true)
         surfaceManager.swapBuffer()
       }
-      if (surfaceManagerPreview.makeCurrent()) {
-        mainRender.drawScreenPreview(w, h, orientationPreview, aspectRatioMode, 0,
-          isPreviewVerticalFlip, isPreviewHorizontalFlip, previewViewPort)
-        surfaceManagerPreview.swapBuffer()
+      try {
+        if (surfaceManagerPreview.makeCurrent()) {
+          mainRender.drawScreenPreview(w, h, orientationPreview, aspectRatioMode, 0,
+            isPreviewVerticalFlip, isPreviewHorizontalFlip, previewViewPort)
+          surfaceManagerPreview.swapBuffer()
+        }
+      } catch (_: RuntimeException) {
+        // Preview surfaces can be detached while the render thread is still draining tasks.
+        // Ignore this race and drop the preview instead of killing the whole app.
+        surfaceManagerPreview.release()
       }
     }
     // render extra multi-preview surfaces (using independent configuration from PreviewSurfaceInfo)
@@ -313,11 +319,15 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
       val previewSnapshot = multiPreviewSurfaceManagers.values.toList()
       previewSnapshot.forEach { info ->
         if (info.surfaceManager.isReady) {
-          if (info.surfaceManager.makeCurrent()) {
-            // Each preview uses its own isPortrait and viewPort configuration
-            mainRender.drawScreenPreview(info.config.width, info.config.height, info.config.isPortrait, info.config.aspectRatioMode, 0,
-              info.config.verticalFlip, info.config.horizontalFlip, info.config.viewPort)
-            info.surfaceManager.swapBuffer()
+          try {
+            if (info.surfaceManager.makeCurrent()) {
+              // Each preview uses its own isPortrait and viewPort configuration
+              mainRender.drawScreenPreview(info.config.width, info.config.height, info.config.isPortrait, info.config.aspectRatioMode, 0,
+                info.config.verticalFlip, info.config.horizontalFlip, info.config.viewPort)
+              info.surfaceManager.swapBuffer()
+            }
+          } catch (_: RuntimeException) {
+            info.surfaceManager.release()
           }
         }
       }

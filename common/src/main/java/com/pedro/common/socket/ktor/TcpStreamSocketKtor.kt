@@ -17,13 +17,16 @@ class TcpStreamSocketKtor(
 ): TcpStreamSocketKtorBase(host, port) {
 
     override suspend fun onConnectSocket(timeout: Long): ReadWriteSocket {
-        selectorManager = SelectorManager(Dispatchers.IO)
+        val context = Dispatchers.IO + kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.CoroutineExceptionHandler { _, throwable ->
+            android.util.Log.e("TcpStreamSocketKtor", "Ktor/TLS error: ${throwable.message}")
+        }
+        selectorManager = SelectorManager(context)
         val builder = aSocket(selectorManager).tcp().connect(
             remoteAddress = InetSocketAddress(host, port),
             configure = { if (!secured) socketTimeout = timeout }
         )
         return if (secured) {
-            builder.tls(Dispatchers.IO) {
+            builder.tls(context) {
                 trustManager = certificate
                 random = SecureRandom()
             }

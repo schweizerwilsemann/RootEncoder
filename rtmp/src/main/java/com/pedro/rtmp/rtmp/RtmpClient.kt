@@ -50,6 +50,8 @@ import com.pedro.rtmp.utils.socket.TcpTunneledSocket
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
@@ -71,8 +73,12 @@ class RtmpClient(private val connectChecker: ConnectChecker) {
   private val validSchemes = arrayOf("rtmp", "rtmps", "rtmpt", "rtmpts")
 
   private var socket: RtmpSocket? = null
-  private var scope = CoroutineScope(Dispatchers.IO)
-  private var scopeRetry = CoroutineScope(Dispatchers.IO)
+  private var scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t ->
+    Log.e(TAG, "Unhandled exception in scope: ${t.message}", t)
+  })
+  private var scopeRetry = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t ->
+    Log.e(TAG, "Unhandled exception in scopeRetry: ${t.message}", t)
+  })
   private var job: Job? = null
   private var jobRetry: Job? = null
   private var commandsManager: CommandsManager = CommandsManagerAmf0()
@@ -106,7 +112,7 @@ class RtmpClient(private val connectChecker: ConnectChecker) {
     get() = rtmpSender.getSentVideoFrames()
   val bytesSend: Long
     get() = rtmpSender.bytesSend
-  var socketType = SocketType.KTOR
+  var socketType = SocketType.JAVA
   var socketTimeout = StreamSocket.DEFAULT_TIMEOUT
   var shouldFailOnRead = false
 
@@ -535,7 +541,7 @@ class RtmpClient(private val connectChecker: ConnectChecker) {
   }
 
   fun disconnect() {
-    CoroutineScope(Dispatchers.IO).launch {
+    scopeRetry.launch {
       disconnect(true)
     }
   }
@@ -558,12 +564,16 @@ class RtmpClient(private val connectChecker: ConnectChecker) {
       jobRetry?.cancelAndJoin()
       jobRetry = null
       scopeRetry.cancel()
-      scopeRetry = CoroutineScope(Dispatchers.IO)
+      scopeRetry = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t ->
+        Log.e(TAG, "Unhandled exception in scopeRetry (new): ${t.message}", t)
+      })
     }
     job?.cancelAndJoin()
     job = null
     scope.cancel()
-    scope = CoroutineScope(Dispatchers.IO)
+    scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t ->
+      Log.e(TAG, "Unhandled exception in scope (new): ${t.message}", t)
+    })
     publishPermitted = false
     commandsManager.reset()
   }

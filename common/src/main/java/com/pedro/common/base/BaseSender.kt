@@ -8,6 +8,8 @@ import com.pedro.common.frame.MediaFrame
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
@@ -34,7 +36,9 @@ abstract class BaseSender(
     private val bitrateManager: BitrateManager = BitrateManager(connectChecker)
     protected var isEnableLogs = true
     private var job: Job? = null
-    protected val scope = CoroutineScope(Dispatchers.IO)
+    protected val scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, throwable ->
+        Log.e(TAG, "Unhandled exception in $TAG: ${throwable.message}", throwable)
+    })
     @Volatile
     var bytesSend = 0L
         protected set

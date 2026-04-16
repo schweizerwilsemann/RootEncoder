@@ -37,6 +37,7 @@ import com.pedro.rtmp.utils.socket.RtmpSocket
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.plus
@@ -153,17 +154,13 @@ class RtmpSender(
 
   private suspend fun getFlvPacket(mediaFrame: MediaFrame?, callback: suspend (FlvPacket) -> Unit) {
     if (mediaFrame == null) return
-    // TODO: Tạm thời loại bỏ cứng SEI trước IDR để tránh lỗi streaming FLV/RTMP
-    if (mediaFrame.info.isKeyFrame) {
+    // Chỉ loại bỏ SEI trước IDR cho VIDEO keyframe, KHÔNG áp dụng cho audio
+    if (mediaFrame.type == MediaFrame.Type.VIDEO && mediaFrame.info.isKeyFrame) {
+      val stripped = tryRemoveSeiBeforeIdr(mediaFrame.data)
       val newMediaFrame = MediaFrame(
-        data = removeSeiBeforeIdr(
-          buffer = mediaFrame.data, headerSize = 0xd0
-        ), info = mediaFrame.info, type = mediaFrame.type
+        data = stripped, info = mediaFrame.info, type = mediaFrame.type
       )
-      when (mediaFrame.type) {
-        MediaFrame.Type.VIDEO -> videoPacket.createFlvPacket(newMediaFrame) { callback(it) }
-        MediaFrame.Type.AUDIO -> audioPacket.createFlvPacket(newMediaFrame) { callback(it) }
-      }
+      videoPacket.createFlvPacket(newMediaFrame) { callback(it) }
       return
     }
     when (mediaFrame.type) {
@@ -173,22 +170,73 @@ class RtmpSender(
   }
 
   /**
-   * Removes vendor-specific SEI or proprietary header inserted before an IDR frame.
+   * Dynamically removes vendor-specific SEI NAL units that precede the IDR NAL
+   * in H.264 keyframes. Returns the original buffer if no SEI is found.
    *
-   * Some Chinese device encoders prepend a fixed-size SEI or private header
-   * before the actual IDR NAL unit, which breaks downstream muxers (e.g. FLV/RTMP).
+   * Scans for start codes (00 00 00 01 or 00 00 01) and checks NAL type:
+   * - Type 6 = SEI → skip it
+   * - Type 5 = IDR → return from this position onward
    *
-   * This function assumes:
-   * - The frame is already identified as a keyframe (IDR)
-   * - The SEI/header size is known and fixed per device/firmware
-   *
-   * ⚠ This is a low-level, device-specific workaround.
-   * Using an incorrect header size WILL corrupt the bitstream.
-   *
-   * @param buffer Raw encoded frame data.
-   * @param headerSize Number of bytes to strip from the beginning of the buffer.
-   * @return A sliced ByteBuffer containing only the actual H.264 payload.
+   * @param buffer Raw encoded H.264 keyframe data
+   * @return ByteBuffer starting at IDR NAL, or original buffer if no SEI found
    */
+  fun tryRemoveSeiBeforeIdr(buffer: ByteBuffer): ByteBuffer {
+    val dup = buffer.duplicate()
+    val remaining = dup.remaining()
+    if (remaining < 5) return buffer
+
+    // Read into byte array for scanning
+    val bytes = ByteArray(remaining)
+    val startPos = dup.position()
+    dup.get(bytes)
+    dup.position(startPos)
+
+    // Find all NAL start code positions
+    var i = 0
+    var idrOffset = -1
+    while (i < bytes.size - 4) {
+      val is4Byte = bytes[i] == 0.toByte() && bytes[i + 1] == 0.toByte() &&
+          bytes[i + 2] == 0.toByte() && bytes[i + 3] == 1.toByte()
+      val is3Byte = bytes[i] == 0.toByte() && bytes[i + 1] == 0.toByte() &&
+          bytes[i + 2] == 1.toByte()
+
+      if (is4Byte || is3Byte) {
+        val nalTypeOffset = if (is4Byte) i + 4 else i + 3
+        if (nalTypeOffset < bytes.size) {
+          val nalType = (bytes[nalTypeOffset].toInt() and 0x1F)
+          when (nalType) {
+            5 -> {
+              // IDR NAL found
+              idrOffset = i
+              break
+            }
+            6 -> {
+              // SEI NAL — continue scanning to find IDR after it
+            }
+            7, 8 -> {
+              // SPS/PPS — these should be kept, don't strip before them
+            }
+          }
+        }
+      }
+      i++
+    }
+
+    if (idrOffset > 0) {
+      // Found SEI before IDR — strip everything before IDR
+      Log.d(TAG, "removeSeiBeforeIdr: stripping $idrOffset bytes of SEI before IDR (total=$remaining)")
+      dup.position(startPos + idrOffset)
+      return dup.slice()
+    }
+
+    // No SEI found before IDR, return original buffer untouched
+    return buffer
+  }
+
+  /**
+   * @deprecated Use tryRemoveSeiBeforeIdr instead
+   */
+  @Deprecated("Use tryRemoveSeiBeforeIdr instead", replaceWith = ReplaceWith("tryRemoveSeiBeforeIdr(buffer)"))
   fun removeSeiBeforeIdr(
     buffer: ByteBuffer,
     headerSize: Int,
@@ -216,7 +264,7 @@ class RtmpSender(
    * @param mediaFrame Video frame containing encoded H.264 data.
    */
   fun dumpIdrFrameToCache(mediaFrame: MediaFrame) {
-    val job = CoroutineScope(Dispatchers.IO) + SupervisorJob()
+    val job = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, _ -> })
 
     if (mediaFrame.info.isKeyFrame) {
       job.launch {

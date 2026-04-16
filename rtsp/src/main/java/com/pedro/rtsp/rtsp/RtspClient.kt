@@ -37,6 +37,8 @@ import com.pedro.rtsp.utils.RtpConstants
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
@@ -59,8 +61,12 @@ class RtspClient(private val connectChecker: ConnectChecker) {
 
   //sockets objects
   private var socket: TcpStreamSocket? = null
-  private var scope = CoroutineScope(Dispatchers.IO)
-  private var scopeRetry = CoroutineScope(Dispatchers.IO)
+  private var scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t ->
+    Log.e(TAG, "Unhandled exception in scope: ${t.message}", t)
+  })
+  private var scopeRetry = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t ->
+    Log.e(TAG, "Unhandled exception in scopeRetry: ${t.message}", t)
+  })
   private var job: Job? = null
   private var jobRetry: Job? = null
   private var mutex = Mutex(locked = true)
@@ -93,7 +99,7 @@ class RtspClient(private val connectChecker: ConnectChecker) {
     get() = rtspSender.getSentVideoFrames()
   val bytesSend: Long
     get() = rtspSender.bytesSend
-  var socketType = SocketType.KTOR
+  var socketType = SocketType.JAVA
   var socketTimeout = StreamSocket.DEFAULT_TIMEOUT
 
   /**
@@ -413,7 +419,7 @@ class RtspClient(private val connectChecker: ConnectChecker) {
   }
 
   fun disconnect() {
-    CoroutineScope(Dispatchers.IO).launch {
+    scopeRetry.launch {
       disconnect(true)
     }
   }
@@ -444,14 +450,18 @@ class RtspClient(private val connectChecker: ConnectChecker) {
       jobRetry?.cancelAndJoin()
       jobRetry = null
       scopeRetry.cancel()
-      scopeRetry = CoroutineScope(Dispatchers.IO)
+      scopeRetry = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t ->
+        Log.e(TAG, "Unhandled exception in scopeRetry (new): ${t.message}", t)
+      })
     } else {
       commandsManager.retryClear()
     }
     job?.cancelAndJoin()
     job = null
     scope.cancel()
-    scope = CoroutineScope(Dispatchers.IO)
+    scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t ->
+      Log.e(TAG, "Unhandled exception in scope (new): ${t.message}", t)
+    })
   }
 
   fun sendVideo(videoBuffer: ByteBuffer, info: MediaCodec.BufferInfo) {
