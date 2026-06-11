@@ -27,7 +27,9 @@ import com.herohan.uvcapp.ICameraHelper
 import com.pedro.encoder.input.sources.OrientationConfig
 import com.pedro.encoder.input.sources.OrientationForced
 import com.pedro.encoder.input.sources.video.VideoSource
+import com.serenegiant.usb.Size
 import com.serenegiant.usb.UVCControl
+import kotlin.math.abs
 
 
 class CameraUvcSource(
@@ -42,13 +44,20 @@ class CameraUvcSource(
   private var surface: Surface? = null
   private var selectedDeviceName: String? = null
   private var uvcControl: UVCControl? = null
+  private var requestedWidth = 1280
+  private var requestedHeight = 720
+  private var requestedFps = 15
 
   override fun create(width: Int, height: Int, fps: Int, rotation: Int): Boolean {
+    requestedWidth = width
+    requestedHeight = height
+    requestedFps = fps
     return true
   }
 
   override fun start(surfaceTexture: SurfaceTexture) {
     this.surfaceTexture = surfaceTexture
+    surfaceTexture.setDefaultBufferSize(requestedWidth, requestedHeight)
     surface = Surface(surfaceTexture)
     cameraHelper = CameraHelper()
     cameraHelper?.setStateCallback(stateCallback)
@@ -156,18 +165,20 @@ class CameraUvcSource(
 
   private val stateCallback: ICameraHelper.StateCallback = object : ICameraHelper.StateCallback {
     override fun onAttach(device: UsbDevice) {
-      if (
-        preferredDeviceName == null ||
-        device.deviceName == preferredDeviceName ||
-        selectedDeviceName == null
-      ) {
-        selectedDeviceName = device.deviceName
-        cameraHelper?.selectDevice(device)
-      }
+      if (preferredDeviceName != null && device.deviceName != preferredDeviceName) return
+      if (selectedDeviceName != null) return
+      selectedDeviceName = device.deviceName
+      cameraHelper?.selectDevice(device)
     }
 
     override fun onDeviceOpen(device: UsbDevice, isFirstOpen: Boolean) {
-      cameraHelper?.openCamera()
+      val previewSize = resolvePreviewSize()
+      if (previewSize != null) {
+        Log.d("CameraUvcSource", "Opening UVC camera with size=$previewSize")
+        cameraHelper?.openCamera(previewSize)
+      } else {
+        cameraHelper?.openCamera()
+      }
     }
 
     override fun onCameraOpen(device: UsbDevice) {
@@ -186,5 +197,20 @@ class CameraUvcSource(
     override fun onDetach(device: UsbDevice) {}
 
     override fun onCancel(device: UsbDevice) {}
+  }
+
+  private fun resolvePreviewSize(): Size? {
+    val sizes = cameraHelper?.supportedSizeList.orEmpty()
+    if (sizes.isEmpty()) return null
+    return sizes.minByOrNull { size ->
+      val resolutionScore =
+        abs(size.width - requestedWidth) + abs(size.height - requestedHeight)
+      val fpsScore = abs(size.fps - requestedFps)
+      resolutionScore * 100 + fpsScore
+    }?.clone()?.also { size ->
+      if (size.fpsList?.contains(requestedFps) == true) {
+        size.fps = requestedFps
+      }
+    }
   }
 }
